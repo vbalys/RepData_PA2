@@ -1,0 +1,317 @@
+---
+title: "The most harmful weather events in the United States between 1950 and 2011"
+output: html_document
+---
+
+## Synopsis
+
+In this report we aim to assess what types of weather events are the most harmful from population health and from economic points of view. We used U.S. National Oceanic and Atmospheric Administration's (NOAA) storm data, that spans period from 1950 to 2011. During initial data processing we decided to use only data from 1996 to 2011 as older records were too sparse or of questionable reliability. Public health implications were addressed by analysing data on fatalities and injuries. Economic consequences were addressed by analysing damages to properties and crops with proper adjustment for inflation. Analysis showed that the most harmful weather events posing highest risks to population health are TORNADO, EXCESSIVE HEAT, FLASH FLOOD, FLOOD, THUNDERSTORM WIND and LIGHTNING. And the most costly events are FLOOD, HURRICANE/TYPHOON, STORM SURGE and TORNADO.
+
+## Data Processing
+
+From the National Weather Service we obtained U.S. National Oceanic and Atmospheric Administration's (NOAA) [storm database](https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2). Database stores data about storms and other severe weather events in the time period between 1950 and November of 2011. 
+
+### Reading in the data
+
+We first read the data from the downloaded csv.bz2 file. 
+```{r cache=TRUE}
+weather_data <- read.csv(bzfile('repdata_data_StormData.csv.bz2'))
+```
+
+The dataset contains of 902297 lines and 37 columns and takes up 400 MB.
+```{r}
+dim(weather_data)
+format(object.size(weather_data), units="Mb")
+```
+
+### Processing the data
+
+```{r message=FALSE}
+library(dplyr)
+```
+
+As this report aims to answer questions of which events are most harmful with respect to population health and which events have the greatest economic consequences, we do not need all the columns and all the rows of the original data. 
+
+The only columns that are needed are BGN_DATE (event start date), EVTYPE (event type), FATALITIES (number of fatalities), INJURIES (number of injuries), PROPDMG (damage to properties), PROPDMGEXP (exponent for property damage value), CROPDMG (damage to crops) and CROPDMGEXP (exponent for crop damage value). 
+
+Furthermore, as we are looking for the most harmful events, we can safely drop events that resulted in zero fatalities, injuries and damages. 
+
+By combining these two steps (selecting columns and filtering rows) we reduce the data set to 254633 rows and 8 columns instead of 902297 and 37 original ones:
+```{r}
+damage_data <- weather_data %>% 
+    select(BGN_DATE, EVTYPE, FATALITIES, INJURIES, PROPDMG, PROPDMGEXP, CROPDMG, CROPDMGEXP) %>%
+    filter(FATALITIES > 0 | INJURIES > 0 | PROPDMG > 0 | CROPDMG > 0)
+dim(damage_data)
+```
+
+Futhermore, for our analysis, we do not need exact date of event start - year is sufficient enough. Dates in the original data set are in the format `month/day/Year Hour:Minute:Second`. We change it to simple year in a renamed column YEAR.
+```{r}
+damage_data <- damage_data %>% 
+    mutate(BGN_DATE = format(strptime(as.character(BGN_DATE), '%m/%d/%Y %H:%M:%S'), '%Y')) %>% 
+    rename(YEAR = BGN_DATE)
+```
+
+Safecheck that transformation succeded - unique values of new variable are years from '1950' to '2011'.
+```{r}
+unique(damage_data$YEAR)
+```
+
+Now we look at number of different events for each year to get an idea about data we are dealing with:
+```{r}
+print(summarise(group_by(damage_data, YEAR), N=length(unique(EVTYPE))), n=62)
+```
+
+The first obvious thing that is evident from this output is that pre-1993 data are really sparse, which we also see from absolute number of events for these years as compared to later years. 
+```{r}
+print(summarise(group_by(damage_data, YEAR), N=length(EVTYPE)), n=62)
+```
+
+This phenomenon most probably indicates that events were not registered in the database, and not that events were that much rarer. Which means that using such data could lead to unreliable results. Also having in mind that pre-1993 data constitutes only a small part of total number of events in the data set, we decided to not use these data in the following analyses. 
+
+Years 1994 and 1995 have significantly higher number of different types of events (158 and 210) than any other years. This probably means that when real data started pouring in back in 1993, there were a lot of errors and inconsistencies specifying event types which led to inflation of these numbers. By checking all different event types of year 1995, we see strong evidences for that, like HURRICANE OPAL/HIGH WINDS and HURRICANE OPAL; FLASH FLOOD and FLASH FLOODING, HEAVY RAINS and HEAVY RAIN, etc.
+```{r}
+sort(unique(damage_data[damage_data$YEAR=='1995',]$EVTYPE))
+```
+
+Again, similarly as with pre-1993 data we decide to not include period up to and including 1995 instead of manually correcting (with much guesswork) event type specification errors. Therefore, for the following analysis we use only data from 1996 to 2011 which covers 16 years of the most recent and intesively registered data.
+```{r}
+recent_data <- damage_data %>% filter(as.integer(YEAR) > 1995)
+```
+
+After this step we end with 201318 rows for events and 222 different used event types (down from more than 985 original ones).
+```{r}
+nrow(recent_data)
+length(unique(recent_data$EVTYPE))
+length(levels(weather_data$EVTYPE))
+```
+
+Before moving on, let us once again check event types. It turns out that data are still quite dirty. There are types that differ only in capitalization or whitespace, due to some misspellings or abbreviations. Therefore, we have to do some normalization of event types (also checking with documentation) before going on with the analysis: we changed case to uppercase, trimmed whitespace, corrected some misspellings, etc. This resulted in a tidier data with 160 different event types.
+
+Transformation:
+```{r}
+library(stringr)
+transform <- function(s) {
+    # Trim whitespace and uppercase
+    s <- str_trim(toupper(as.character(s)))
+    # Multiple whitespace
+    s <- gsub(' +', ' ', s)
+    # FLOODING -> FLOOD
+    s <- gsub('FLOODING', 'FLOOD', s)
+    # WINDS -> WIND
+    s <- gsub('WINDS', 'WIND', s)
+    # UNSEASONABLE
+    s <- gsub('UNSEASONABLY', 'UNSEASONABLE', s)
+    s <- gsub('UNSEASONAL', 'UNSEASONABLE', s)
+    # WIND SPEED
+    s <- gsub(' (G\\d+)$', ' \\(\\1\\)', s)
+    s <- gsub(' (\\d+)$', ' \\(G\\1\\)', s)
+    s <- gsub(' \\((\\d+)\\)$', ' \\(G\\1\\)', s)
+    # Thunderstorm
+    s <- gsub('TSTM', 'THUNDERSTORM', s)
+    # Hurricane/Typhoon
+    s <- gsub('HURRICANE/TYPHOON', 'HURRICANE', s)
+    s <- gsub('TYPHOON', 'HURRICANE', s)
+    s <- gsub('HURRICANE', 'HURRICANE/TYPHOON', s)
+    # Specific ones
+    s <- gsub('COASTALSTORM', 'COASTAL STORM', s)
+    s <- gsub('FLASH FLOOD/FLOOD', 'FLASH FLOOD', s)
+    s <- gsub('FLOOD/FLASH/FLOOD', 'FLASH FLOOD', s)
+    s <- gsub('WINDCHILL', 'WIND CHILL', s)
+    s <- gsub('ICE ROADS', 'ICY ROADS', s)
+    s <- gsub('WEATHER/MIX', 'WEATHER MIX', s)
+    s <- gsub('WINTRY MIX', 'WINTER WEATHER MIX', s)
+}
+
+recent_data <- recent_data %>% 
+    mutate(EVTYPE = as.factor(transform(EVTYPE)))
+
+length(levels(recent_data$EVTYPE))
+```
+
+Now we get to damage data. Both for property and crop damage actual damage value is split over two columns. PROPDMG (and, respectively, CROPDMG for crops) holds numeric value while PROPDMGEXP (and, respectively, CROPDMGEXP for crops) holds exponent for that value. 
+
+Checking exponents we see that there are three different values: 'K' (multiplier of 1,000 US dollars), 'M' (multiplier of 1,000,000 US dollars) and 'B' (multiplier of 1,000,000,000 US dollars). 
+```{r}
+unique(recent_data$PROPDMGEXP)
+unique(recent_data$CROPDMGEXP)
+```
+
+Having that in mind, we can calculate actual damage values in US dollars and save them into two new columns PROP and CROP. 
+```{r}
+calculated_data <- recent_data %>%
+    mutate(
+        PROP = PROPDMG * (ifelse(PROPDMGEXP=='K', 1000, ifelse(PROPDMGEXP=='M', 1000^2, ifelse(PROPDMGEXP=='B', 1000^3, 0)))),
+        CROP = CROPDMG * (ifelse(CROPDMGEXP=='K', 1000, ifelse(CROPDMGEXP=='M', 1000^2, ifelse(CROPDMGEXP=='B', 1000^3, 0))))
+    )
+```
+
+There is a another problem with damage estimates: they are presented as nominal values. However, due to inflation one dollar in 1996 is not equal to one dollar in 2011. We have to adjust these values for inflation, so that all sums are presented in dollars of 2014 (we could choose any other year, because absolute numbers are not important for our study, however, 2014 is the closest year to today for which there is inflation data for a year). 
+
+We hand-copied inflation data for years 1996-2014 from [this URL](http://www.usinflationcalculator.com/inflation/historical-inflation-rates/) and saved into `inflation.csv`.
+
+We adjust for inflation on a full year basis. We assume that 1 dollar in 2014 was worth exactly 1 dollar. As average inflation for year 2014 was 1.6, this means that 1 dollar in 2014 was worth 1.6 percent less than in year 2013, i.e one dollar in 2013 was worth 1.016 dollars of 2014. Following the same pattern, 1 dollar in 2012 (average inflation in 2013 was 1.5) was worth 1.016 * 1.015 dollars of 2014. And so on. Following this pattern we get multiplicators that adjust for inflation.
+```{r}
+inflation = read.csv('inflation.csv')
+inflation <- inflation %>% 
+    mutate(Change = 1 + Rate / 100)
+inflation$Multiplier <- Reduce(x=inflation$Change, f=prod, right=TRUE, accumulate=TRUE)
+inflation
+```
+
+We see that 1 US dollar in 1996 was worth 1.55 dollars of 2014. Now, we update all damage values according to the adjustment multipliers.
+```{r}
+inflation <- filter(inflation, as.integer(Year) <= 2011)
+adjusted_data <- calculated_data %>%
+    mutate(Multiplier = as.factor(YEAR))
+levels(adjusted_data$Multiplier) <- inflation$Multiplier
+adjusted_data <- adjusted_data %>% 
+    mutate(
+        Multiplier = as.double(as.character(Multiplier)),
+        PROPM = PROP * Multiplier,
+        CROPM = CROP * Multiplier
+    )
+
+```
+
+Final data preparation step is to select only those columns that will be needed in further analysis and rename them for readability.
+```{r}
+master_data <- adjusted_data %>% 
+    select(YEAR, EVTYPE, FATALITIES, INJURIES, PROPM, CROPM) %>%
+    rename(
+        Year=YEAR, 
+        Event=EVTYPE,
+        Fatalities=FATALITIES, 
+        Injuries=INJURIES,
+        Property_damage=PROPM,
+        Crop_damage=CROPM
+    )
+head(master_data)
+```
+
+## Results
+
+### The most harmful events with respect to population health
+
+Severe events may cause injuries or death. These are listed in Injuries and Fatalities columns in our prepared data. To assess which of events are the most harmful, we look at total number of fatalities and injuries for each event over all years. 
+```{r}
+health_data <- master_data %>%
+    group_by(Event) %>%
+    summarise(
+        Total_Fatalities=sum(Fatalities), 
+        Total_Injuries=sum(Injuries)
+    )
+
+fatalities <- health_data %>%
+    select(Event, Total_Fatalities) %>%
+    arrange(desc(Total_Fatalities))
+
+injuries <- health_data %>%
+    select(Event, Total_Injuries) %>%
+    arrange(desc(Total_Injuries))
+
+```
+
+Top 10 events with highest tolls of fatalities and injuries.
+```{r}
+top_fatalities <- fatalities[1:10,]
+top_injuries <- injuries[1:10,]
+```
+
+```{r fig.width=10}
+par(mfrow=c(1, 2), oma=c(2, 0, 2, 0), mar=c(2, 8, 4, 2))
+par(las=1)
+barplot(top_fatalities$Total_Fatalities, horiz=TRUE, names.arg=top_fatalities$Event, cex.names=0.6, main="Fatalities")
+barplot(top_injuries$Total_Injuries, horiz=TRUE, names.arg=top_injuries$Event, cex.names=0.6, main="Injuries")
+mtext('Most harmful events (highest total fatalities and injuries)', outer=TRUE, side=3, line=-1, cex=1.3)
+```
+
+We see that top 6 events with highest fatalities and highest injuries are the same, only in different order:
+
+- TORNADO
+- EXCESSIVE HEAT
+- FLASH FLOOD
+- FLOOD
+- THUNDERSTORM WIND
+- LIGHTNING
+
+These events are responsible for 5631 fatalities (64% of total fatalities) and 44660 injuries (77% of total injuries). 
+
+```{r}
+total_fatalities <- sum(fatalities$Total_Fatalities)
+top_six_fatalities <- sum(fatalities[1:6,]$Total_Fatalities)
+total_injuries <- sum(injuries$Total_Injuries)
+top_six_injuries <- sum(injuries[1:6,]$Total_Injuries)
+c(top_six_fatalities, top_six_injuries)
+c(top_six_fatalities/total_fatalities, top_six_injuries/total_injuries)
+```
+
+**We conclude, that TORNADO, EXCESSIVE HEAT, FLASH FLOOD, FLOOD, THUNDERSTORM WIND and LIGHTNING are the most harmful weather events with respect to population health**.
+
+### Events with the greatest economic consequences
+
+Economic consequences of events are related to the damage they impose. Therefore, we look into columns Property_damage and Crop_damage to find out which events are the most costly. Similarly as with injuries and fatalities, let us combine total amount of damages over all years. Also we sum up both types of damages.
+```{r}
+economic_data <- master_data %>%
+    group_by(Event) %>%
+    summarise(
+        Total_damage=sum(Property_damage) + sum(Crop_damage)
+    )
+
+damage <- economic_data %>%
+    select(Event, Total_damage) %>%
+    arrange(desc(Total_damage))
+```
+
+Top 10 events with highest damage over all years:
+```{r}
+top_damage <- damage[1:10,]
+```
+
+```{r fig.width=10}
+par(las=1, mar=c(2, 8, 4, 2))
+barplot(top_damage$Total_damage/1000^3, horiz=TRUE, names.arg=top_damage$Event, cex.names=0.6, main="Most economically harmful events (with highest level of damages)", xlab="Damage (in bln. dollars)")
+```
+
+We see that top four events with highest economic consequences are:
+
+- FLOOD
+- HURRICANE/TYPHOON
+- STORM SURGE
+- TORNADO
+
+Together they caused almost 380 bln dollars of damages over the years 1996-2011 which constitutes 75% of total damages for all events.
+```{r}
+total_damage <- sum(damage$Total_damage)
+top_four_damage <- sum(damage[1:4,]$Total_damage)
+top_four_damage / 10^9
+top_four_damage/total_damage
+```
+
+Let us also look at the year-to-year changes of the part of total damages that are caused by these top four events.
+```{r}
+year_event_data <- master_data %>%
+    group_by(Year, Event) %>%
+    summarise(
+        Damage=sum(Property_damage) + sum(Crop_damage)
+    )
+
+year_total_data <- year_event_data %>%
+    group_by(Year) %>%
+    summarise(Total = sum(Damage))
+
+year_top_data <- year_event_data %>% 
+    filter(Event %in% c('FLOOD', 'HURRICANE/TYPHOON', 'STORM SURGE', 'TORNADO')) %>%
+    group_by(Year) %>%
+    summarise(Top = sum(Damage))
+
+year_data <- merge(year_total_data, year_top_data)
+top_data <- year_data$Top / year_data$Total
+```
+
+```{r}
+barplot(top_data, names.arg=year_top_data$Year, xlab="Year", ylab="Part of total damages", main="Part of total damages caused by top four events")
+```
+
+We see that top four events (FLOOD, HURRICANE/TYPHOON, STORM SURGE, TORNADO) constitute different part of total damages from year to year. But it is also evident that with about 5 years periodicity this part raises high, up to 60 percent and more).
+
+**From our analysis we conclude that events FLOOD, HURRICANE/TYPHOON, STORM SURGE and TORNADO have the greatest economic consequences.**
